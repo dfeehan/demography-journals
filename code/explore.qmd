@@ -4,23 +4,300 @@ format: html
 editor: visual
 ---
 
-## Quarto
-
-Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
-
-## Running Code
-
-When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
-
 ```{r}
-1 + 1
+library(here)
+library(tidyverse)
+library(jsonlite)
+library(RcppSimdJson)
+library(stm)
+library(topicmodels)
+
+library(scales)
+
+library(tictoc)
 ```
 
-You can add options to executable code like this
-
 ```{r}
-#| echo: false
-2 * 2
+#data_dir <- here('data', 'constellate', 'five-journals')
+data_dir <- here('data', 'constellate', 'five-journals-full-text')
 ```
 
-The `echo: false` option disables the printing of code (only output is displayed).
+```{r}
+#fn <- "d74c500f-aac2-b637-4317-40fbcb267b0a-jsonl.jsonl.gz"
+#fn_extracted <- "d74c500f-aac2-b637-4317-40fbcb267b0a-jsonl.jsonl"
+
+fn <- "part-1.jsonl.gz"
+fn_extracted <- "part-1.jsonl"
+```
+
+```{r}
+tic("parsing raw .json file")
+raw_json <- stream_in(gzfile(file.path(data_dir, fn), 'r'))
+toc()
+```
+
+```{r}
+#tmp <- raw_json %>%
+  #filter(str_detect(creator, 'Feehan'))
+  #filter(str_detect(creator, 'Cobb'))
+#  filter(str_detect(creator, 'Cobb'))
+
+tmp <- raw_json %>%
+  filter(isPartOf == 'Demography') %>%
+  filter(publicationYear == 2019)
+
+# it looks like the issue number only goes up to 5?
+# (but my 2019 paper, for example, is in issue number 6)
+table(tmp$issueNumber)
+```
+
+TODO - for Demography, it looks like
+
+-   issue 6 is missing for 2019
+-   issues 2-6 are missing for 2021
+-   issue 1-3 and 5-6 are missing for 2022
+
+TODO - confirm that earlier missing issues for Demography are because the number of issues expanded in 2013 and 1969 - look at other journals and see if there are gaps there, too
+
+```{r}
+demography <- raw_json %>% filter(isPartOf == 'Demography')
+```
+
+```{r}
+jsumm <- raw_json %>%
+  group_by(journal = isPartOf) %>%
+  group_map(
+    ~ .x %>% group_by(journal, 
+                      publicationYear
+                      #issueNumber,
+                      #volumeNumber
+                      ) %>% tally(),
+    .keep=TRUE
+  ) %>%
+  bind_rows()
+
+jsumm
+```
+
+```{r}
+jsumm %>%
+  ggplot(.) +
+  geom_line(aes(x = publicationYear, y = n, color=journal, group=journal)) +
+  theme_minimal()
+```
+
+```{r}
+jsumm %>%
+  ggplot(.) +
+  geom_tile(aes(x = publicationYear, y = journal, fill=n)) +
+  scale_fill_gradient(low='black', high='red') +
+  theme_minimal() +
+  ylab("")
+```
+
+Let's focus on documents published up to 2020
+
+```{r}
+library(tidytext)
+```
+
+This takes \~ 9 mins on my mbp from 2019
+
+```{r}
+data(stop_words)
+
+tic('tidying corpus')
+tidy_j <- raw_json %>%
+  unnest_longer(col = fullText,
+                values_to = 'text',
+                indices_to = 'text_chunk') %>%
+  unnest_tokens(word, text) %>%
+  anti_join(stop_words) %>%
+  filter(! word %in% paste(0:9))
+  
+toc()
+```
+
+## Word frequencies
+
+```{r}
+word_freqs <- tidy_j %>%
+  count(word, sort=TRUE) 
+```
+
+```{r}
+top_word_freqs_plot <- word_freqs %>%
+  filter(n > 100000) %>%
+  filter(! word %in% paste(0:9)) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n,word)) +
+  geom_col() +
+  theme_minimal() +
+  labs(y=NULL)
+
+top_word_freqs_plot
+```
+
+```{r}
+word_freq_byj <- tidy_j %>%
+  mutate(journal = isPartOf) %>%
+  # this is a quick and dirty way to avoid numbers
+  mutate(word = str_extract(word, "[a-z']+")) %>%
+  count(journal, word) %>%
+  group_by(journal) %>%
+  mutate(word_prop = n / sum(n)) %>%
+  select(-n) %>%
+  pivot_wider(names_from = journal, values_from = word_prop) 
+```
+
+```{r}
+word_freq_byj %>%
+  ggplot(aes(x = Demography, y=`Population and Development Review`)) +
+  geom_abline(color='gray40', lty=2) +
+  geom_jitter(alpha = 0.1, size=2.5, width=.3, height=.3) +
+  geom_text(aes(label=word), check_overlap=TRUE, vjust=1.5) +
+  scale_x_log10(labels=percent_format()) +
+  scale_y_log10(labels=percent_format())
+```
+
+```{r}
+cor.test(data = word_freq_byj, ~ Demography + `Population and Development Review`)
+```
+
+```{r}
+word_freq_byj %>%
+  ggplot(aes(x = Demography, y=`Demographic Research`)) +
+  geom_abline(color='gray40', lty=2) +
+  geom_jitter(alpha = 0.1, size=2.5, width=.3, height=.3) +
+  geom_text(aes(label=word), check_overlap=TRUE, vjust=1.5) +
+  scale_x_log10(labels=percent_format()) +
+  scale_y_log10(labels=percent_format())
+```
+
+```{r}
+cor.test(data = word_freq_byj, ~ Demography + `Demographic Research`)
+```
+
+```{r}
+word_freq_byj %>%
+  ggplot(aes(x = Demography, y=`Studies in Family Planning`)) +
+  geom_abline(color='gray40', lty=2) +
+  geom_jitter(alpha = 0.1, size=2.5, width=.3, height=.3) +
+  geom_text(aes(label=word), check_overlap=TRUE, vjust=1.5) +
+  scale_x_log10(labels=percent_format()) +
+  scale_y_log10(labels=percent_format())
+```
+
+```{r}
+cor.test(data = word_freq_byj, ~ Demography + `Studies in Family Planning`)
+```
+
+```{r}
+word_freq_byj %>%
+  ggplot(aes(x = Demography, y=`Population Studies`)) +
+  geom_abline(color='gray40', lty=2) +
+  geom_jitter(alpha = 0.1, size=2.5, width=.3, height=.3) +
+  geom_text(aes(label=word), check_overlap=TRUE, vjust=1.5) +
+  scale_x_log10(labels=percent_format()) +
+  scale_y_log10(labels=percent_format())
+```
+
+```{r}
+cor.test(data = word_freq_byj, ~ Demography + `Population Studies`)
+```
+
+## TF-IDF
+
+This takes \~ 9 mins on my mbp from 2019
+
+```{r}
+data(stop_words)
+
+tic('tidying corpus')
+article_words <- raw_json %>%
+  mutate(journal = isPartOf) %>%
+  unnest_longer(col = fullText,
+                values_to = 'text',
+                indices_to = 'text_chunk') %>%
+  unnest_tokens(word, text) %>%
+  # don't take out stop words for tf-idf
+  anti_join(stop_words) %>%
+  
+  count(url, title, journal, word, sort=TRUE)
+
+total_words <- article_words %>%
+  group_by(url, title, journal) %>%
+  summarize(total = sum(n))
+
+toc()
+```
+
+```{r}
+article_words <- article_words %>%
+  left_join(total_words)
+
+article_words %>% slice(1:100)
+```
+
+```{r}
+article_tf_idf <- article_words %>%
+  bind_tf_idf(word, url, n)
+```
+
+```{r}
+max_tf_idf <- article_tf_idf %>%
+  group_by(url, title, journal) %>%
+  slice_max(tf_idf, n=15)
+```
+
+```{r}
+max_tf_idf %>% 
+  ungroup() %>%
+  slice(1:1000) %>%
+  select(-url)
+```
+
+## Topic modeling
+
+Helpful: https://www.tidytextmining.com/topicmodeling.html
+
+### topicmodels package
+
+```{r}
+article_sparse_dtm <- article_words %>%
+  cast_dtm(url, word, n)
+```
+
+```{r}
+tic("Fitting LDA topic model")
+article_lda <- LDA(article_sparse_dtm,
+                   k=10,
+                   control = list(seed=1234))
+toc()
+```
+
+```{r}
+article_lda_tidy <- tidy(article_lda, matrix='beta')
+article_lda_tidy
+```
+
+```{r}
+top_terms <- article_lda_tidy %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 5) %>% 
+  ungroup() %>%
+  arrange(topic, -beta)
+
+top_terms
+```
+
+```{r}
+top_terms %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  scale_y_reordered()
+```
+
+
